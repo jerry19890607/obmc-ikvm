@@ -184,17 +184,6 @@ struct profile _wait;
 #define USBHID_KEY_UP		0x52
 #define USBHID_KEY_NUMLOCK	0x53
 
-#if 1
-#define DESPRINTF(s,...) do{char desbuff[256];char descmd[256];\
-snprintf(desbuff, sizeof(desbuff), s,__VA_ARGS__);\
-snprintf(descmd, sizeof(descmd), "ddd[%s:%d] %s\n",__func__,__LINE__,desbuff);\
-printf("%s",descmd);}while(0)
-
-#else
-#define DESTIME()
-#endif
-
-
 static volatile bool ok = true;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -833,7 +822,20 @@ static int get_frame(struct obmc_ikvm *ikvm)
 {
 	int rc;
 	struct v4l2_format fmt;
-	DESPRINTF("%s","obmc");
+#if 1
+	fd_set set;
+	struct timeval timeout;
+	struct v4l2_dv_timings timings;
+	int rv;
+
+	FD_ZERO(&set); /* clear the set */
+	FD_SET(ikvm->videodev_fd, &set); /* add our file descriptor to the set */
+
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 100;
+#else
+#endif
+
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_FMT, &fmt);
 	if (rc < 0) {
@@ -841,12 +843,12 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		       strerror(errno));
 		return -EFAULT;
 	}
-	DESPRINTF("dfmt:%dx%d ikvm:%dx%d",fmt.fmt.pix.width,fmt.fmt.pix.height,ikvm->resolution.width,ikvm->resolution.height);
 	
 	if (fmt.fmt.pix.width != ikvm->resolution.width ||
 	    fmt.fmt.pix.height != ikvm->resolution.height) {
 		char *old_frame = ikvm->frame;
 
+		printf("fmt: [%dx%d] | ikvm: [%dx%d]\n",fmt.fmt.pix.width,fmt.fmt.pix.height,ikvm->resolution.width,ikvm->resolution.height);
 		rc = alloc_frame(ikvm, &fmt);
 		if (rc)
 			return rc;
@@ -870,11 +872,39 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		/* Get the image on the next iteration */
 		ikvm->wait_next = true;
 		pthread_mutex_unlock(&mutex);
-		DESPRINTF("%s","wait 2 sec");
-		sleep(2);
+		sleep(1);
 		return 0;
 	}
 
+#if 1
+	rv = select(ikvm->videodev_fd + 1, &set, NULL, NULL, &timeout);
+	if(rv == -1)
+	{
+		perror("select"); /* an error accured */
+		return -EFAULT;
+	}
+	else if(rv == 0)
+	{
+		//printf("timeout"); /* a timeout occured */
+		return 0;
+	}    
+	else
+	{
+		rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
+		if (rc < 0) {
+			printf("failed to read frame: %d %s\n", errno,
+			strerror(errno));
+			return -EFAULT;
+		}
+		if (rc != ikvm->frame_size)
+			DBG("new frame size: %d\n", rc);
+
+		ikvm->frame_size = rc;
+		send_frame_to_clients(ikvm);
+
+		return 0;
+	}
+#else
 	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
 	if (rc < 0) {
 		printf("failed to read frame: %d %s\n", errno,
@@ -889,6 +919,7 @@ static int get_frame(struct obmc_ikvm *ikvm)
 	send_frame_to_clients(ikvm);
 
 	return 0;
+#endif
 }
 
 static void dump_frame(struct obmc_ikvm *ikvm)
